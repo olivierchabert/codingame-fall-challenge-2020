@@ -128,16 +128,19 @@ class Order extends AbstractSpell
 {
     /** @var int */
     public $rupees;
+    /** @var int */
+    public $bonus;
 
-    public function __construct(int $id, Recipe $recipe, int $rupees)
+    public function __construct(int $id, Recipe $recipe, int $rupees, int $bonus)
     {
         parent::__construct($id, $recipe);
         $this->rupees = $rupees;
+        $this->bonus = $bonus;
     }
 
     public function __toString(): string
     {
-        return 'Order: ('.$this->rupees.') '.$this->recipe;
+        return 'Order n°'.$this->id.': ('.$this->rupees.') '.$this->recipe;
     }
 }
 
@@ -162,16 +165,18 @@ class Spell extends AbstractSpell
         $this->owner->spells[] = $this;
     }
 
-    public function isCastable(int $repeat = 1): bool
+    public function isCastable(int $repeat = 1, $onlyActive = true): bool
     {
-        return $this->active &&
+        $active = $onlyActive ? $this->active : !$this->active;
+
+        return $active &&
             $this->owner->inventory->left() > $this->recipe->sum() &&
             $this->owner->inventory->canProvide($this->recipe, $repeat);
     }
 
     public function __toString(): string
     {
-        return 'Spell: ('.
+        return 'Spell n°'.$this->id.': ('.
             ($this->active?'en':'dis').'able, '.
             ($this->repeatable?'repeatable':'').', '.
             'x'.($this->nbRepeat).') '.
@@ -189,21 +194,22 @@ class Player
     public $rupees;
 
     /**
+     * @param bool $onlyActive
      * @return Spell[]
      */
-    public function castables(): array
+    public function castables($onlyActive = true): array
     {
         return array_filter(
             $this->spells,
-            function (Spell $spell) {
-                return $spell->isCastable();
+            function (Spell $spell) use ($onlyActive) {
+                return $spell->isCastable(1, $onlyActive);
             }
         );
     }
 
-    public function bestSpell(Inventory $inventory, Commerce $commerce): ?Spell
+    public function bestSpell(Inventory $inventory, Commerce $commerce, $onlyActive = true): ?Spell
     {
-        $castables = $this->castables();
+        $castables = $this->castables($onlyActive);
         $castablesByCost = [];
         $max = $commerce->max()->add(new Recipe(1, 1, 1, 1));
 
@@ -255,6 +261,24 @@ class Player
 
         return $toRest;
     }
+
+    public function get(int $id): ?Spell
+    {
+        foreach ($this->spells as $spell) {
+            if ($spell->id === $id) {
+                return $spell;
+            }
+        }
+        return null;
+    }
+
+    public function rest()
+    {
+        foreach ($this->spells as $spell) {
+            $spell->active = true;
+            $spell->nbRepeat = 1;
+        }
+    }
 }
 
 class Commerce
@@ -272,6 +296,16 @@ class Commerce
         );
     }
 
+    public function castables(Inventory $inventory): array
+    {
+        return array_filter(
+            $this->orders,
+            function (Order $order) use ($inventory) {
+                return $inventory->canProvide($order->recipe);
+            }
+        );
+    }
+
     public function best(Inventory $inventory): ?Order
     {
         foreach ($this->orders as $order) {
@@ -281,6 +315,23 @@ class Commerce
         }
 
         return null;
+    }
+
+    public function get(int $id): ?Order
+    {
+        foreach ($this->orders as $order) {
+            if ($order->id === $id) {
+                return $order;
+            }
+        }
+        return null;
+    }
+
+    public function remove(int $id)
+    {
+        $this->orders = array_filter($this->orders, function (Order $order) use ($id) {
+            return $order->id != $id;
+        });
     }
 
     public function max(): Recipe
@@ -300,12 +351,24 @@ class TomeSpell extends AbstractSpell
     public $index;
     /** @var int */
     public $tax;
+    /** @var bool */
+    public $repeatable;
 
-    public function __construct(int $id, Recipe $recipe, int $index, int $tax)
+    public function __construct(int $id, Recipe $recipe, int $index, int $tax, int $repeatable)
     {
         parent::__construct($id, $recipe);
         $this->index = $index;
         $this->tax = $tax;
+        $this->repeatable = $repeatable;
+    }
+
+    public function __toString(): string
+    {
+        return 'TomeSpell n°'.$this->id.': ('.
+            ($this->repeatable?'repeatable':'').', '.
+            ($this->tax).', '.
+            ($this->index).', '.
+            $this->recipe;
     }
 }
 
@@ -318,7 +381,8 @@ class Tome
     {
         $learnables = [];
         foreach ($this->spells as $tomeSpell) {
-            if ($tomeSpell->recipe->cost() === 0) {
+            $cost = $tomeSpell->recipe->cost();
+            if ($cost === 0) {
                 if ($player->inventory->canProvide(new Recipe(-$tomeSpell->index))) {
                     $learnables[] = $tomeSpell;
                 }
@@ -349,10 +413,6 @@ class Tome
                     return 0;
                 }
             );
-            foreach ($learnables as $tomeSpell)
-            {
-                error_log(var_export($tomeSpell->recipe->delta, true));
-            }
 
             return reset($learnables);
         }
@@ -360,16 +420,9 @@ class Tome
         return null;
     }
 
-    public function best(Inventory $inventory, bool $onlyPositive = true): ?TomeSpell
+    public function best(Inventory $inventory): ?TomeSpell
     {
-        $learnables = [];
-        foreach ($this->spells as $tomeSpell) {
-            if (!$onlyPositive || $tomeSpell->recipe->sum() > 0) {
-                if ($inventory->canProvide(new Recipe(-$tomeSpell->index))) {
-                    $learnables[] = $tomeSpell;
-                }
-            }
-        }
+        $learnables = $this->learnables($inventory);
 
         if (!empty($learnables)) {
             $ingredients = $inventory->ingredients();
@@ -379,8 +432,8 @@ class Tome
                     $cost = $b->recipe->cost() <=> $a->recipe->cost();
                     if ($cost === 0) {
                         foreach ($ingredients as $ingredient) {
-                            if ($b->recipe->delta[$ingredient] != $a->recipe->delta[$ingredient]) {
-                                return $b->recipe->delta[$ingredient] <=> $a->recipe->delta[$ingredient];
+                            if ($a->recipe->delta[$ingredient] != $b->recipe->delta[$ingredient]) {
+                                return $a->recipe->delta[$ingredient] <=> $b->recipe->delta[$ingredient];
                             }
                         }
                     }
@@ -393,6 +446,110 @@ class Tome
         }
 
         return null;
+    }
+
+    public function get(int $id): ?TomeSpell
+    {
+        foreach ($this->spells as $spell) {
+            if ($spell->id === $id) {
+                return $spell;
+            }
+        }
+        return null;
+    }
+
+    public function remove(int $id)
+    {
+        $this->spells = array_filter($this->spells, function (TomeSpell $spell) use ($id) {
+            return $spell->id != $id;
+        });
+    }
+
+    /**
+     * @param Inventory $inventory
+     * @param int $limit
+     * @return TomeSpell[]
+     */
+    public function learnables(Inventory $inventory): array
+    {
+        $learnables = [];
+        foreach ($this->spells as $tomeSpell) {
+            if ($inventory->canProvide(new Recipe(-$tomeSpell->index))) {
+                $learnables[] = $tomeSpell;
+            }
+        }
+        return $learnables;
+    }
+
+    public function __toString(): string
+    {
+        $msg = 'Tome:'."\n";
+        foreach ($this->spells as $spell) {
+            $msg .= "\t".$spell."\n";
+        }
+
+        return $msg;
+    }
+}
+
+class Action
+{
+    /** @var string */
+    public $action;
+    /** @var Step */
+    public $step;
+
+    public function __construct(string $action, Step $step)
+    {
+        $this->action = $action;
+        $this->step = $this->next($step);
+    }
+
+    public function next(Step $current): Step
+    {
+        /** @var Step $next */
+        $next = unserialize(serialize($current)); // make deep clone
+
+        switch ($this->action) {
+            case 'REST':
+                $next->players[0]->rest();
+            case 'WAIT':
+                return $next;
+        }
+
+        [$action, $id] = explode(' ', $this->action);
+        switch ($action) {
+            case 'BREW':
+                $order = $next->commerce->get($id);
+                $next->players[0]->rupees += $order->rupees;
+                $next->commerce->remove($id);
+                break;
+            case 'CAST':
+                $spell = $next->players[0]->get($id);
+                for ($i = $spell->nbRepeat; $i > 0; $i--) {
+                    $next->players[0]->inventory->add($spell->recipe);
+                }
+                $spell->active = false;
+                $spell->nbRepeat = 1;
+                break;
+            case 'LEARN':
+                $spell = $next->tome->get($id);
+                new Spell($id, $spell->recipe, $next->players[0], true, $spell->repeatable);
+                $next->tome->remove($id);
+                break;
+        }
+
+        return $next;
+    }
+
+    public function rupees(int $iteration): int
+    {
+        $rupees = $this->step->players[0]->rupees;
+        if ($iteration > 0) {
+            $iteration--;
+            $rupees += $this->step->bestAction($iteration)->rupees($iteration);
+        }
+        return $rupees;
     }
 }
 
@@ -418,7 +575,7 @@ class Step
             switch ($args[1]) {
                 case 'BREW':
                     [$id, , $a, $b, $c, $d, $rupees, $bonus] = $args;
-                    $this->commerce->orders[] = new Order($id, new Recipe($a, $b, $c, $d), $rupees + $bonus);
+                    $this->commerce->orders[] = new Order($id, new Recipe($a, $b, $c, $d), $rupees, $bonus);
                     break;
                 case 'CAST':
                     [$id, , $a, $b, $c, $d, , , , $active, $repeatable] = $args;
@@ -429,8 +586,8 @@ class Step
                     new Spell($id, new Recipe($a, $b, $c, $d), $this->players[1], $active, $repeatable);
                     break;
                 case 'LEARN':
-                    [$id, , $a, $b, $c, $d, , $index, $tax, ,] = $args;
-                    $this->tome->spells[] = new TomeSpell($id, new Recipe($a, $b, $c, $d), $index, $tax);
+                    [$id, , $a, $b, $c, $d, , $index, $tax, , $repeatable] = $args;
+                    $this->tome->spells[] = new TomeSpell($id, new Recipe($a, $b, $c, $d), $index, $tax, $repeatable);
                     break;
                 default:
                     /* $id, $type, $a, $b, $c, $d, $rupees, $tomeIndex, $taxCount, $castable, $repeatable */
@@ -448,41 +605,94 @@ class Step
 
     public function launch(): string
     {
+        return $this->bestAction(2)->action;
+    }
+
+    public function bestAction(int $iteration): Action
+    {
+        $actions = $this->actions();
+        $best = new Action($this->rest(), $this);
+        $maxRupees = -1;
+
+        foreach ($actions as $action) {
+            $rupees = $action->rupees($iteration);
+            if ($maxRupees < $rupees) {
+                $best = $action;
+                $maxRupees = $rupees;
+            }
+        }
+
+        return $best;
+    }
+
+    /**
+     * @return Action[]
+     */
+    public function actions(): array
+    {
+        $actions = [];
+
+        $order = $this->commerce->best($this->players[0]->inventory);
+        if ($order !== null) {
+            $actions[] = new Action($this->brew($order), $this);
+        } else {
+
+            $spells = array_slice($this->players[0]->castables(), 0, 3);
+            foreach ($spells as $spell) {
+                $actions[] = new Action($this->cast($spell), $this);
+            }
+
+            if (count($this->players[0]->spells) < 10) {
+                $learnables = array_slice($this->tome->learnables($this->players[0]->inventory), 0, 2);
+                foreach ($learnables as $spell) {
+                    $actions[] = new Action($this->learn($spell), $this);
+                }
+            }
+
+            if (count($this->players[0]->toRest()) > 3) {
+                $actions[] = new Action($this->rest(), $this);
+            }
+        }
+
+        return $actions;
+
+
+
         // learn new free spell
         $spell = $this->tome->free($this->players[0]);
         if ($spell !== null) {
-            return $this->learn($spell);
+            $actions[] = new Action($this->learn($spell), $this);
         }
 
         // prepare order if is possible
         $order = $this->commerce->best($this->players[0]->inventory);
         if ($order !== null) {
-            return $this->brew($order);
+            $actions[] = new Action($this->brew($order), $this);
         }
 
         // execute spell
         $spell = $this->players[0]->bestSpell($this->players[0]->inventory, $this->commerce);
         if ($spell !== null) {
-            return $this->cast($spell);
+            $actions[] = new Action($this->cast($spell), $this);
         }
 
         if (count($this->players[0]->toRest()) > 3) {
-            return $this->rest();
+            $actions[] = new Action($this->rest(), $this);
         }
 
         // learn new spell
         $spell = $this->tome->best($this->players[0]->inventory);
         if ($spell !== null) {
-            return $this->learn($spell);
+            $actions[] = new Action($this->learn($spell), $this);
         }
 
-        // learn new spell
-        $spell = $this->tome->best($this->players[0]->inventory, false);
-        if ($spell !== null) {
-            return $this->learn($spell);
+        if (empty($actions)) {
+            $actions[] = new Action($this->rest(), $this);
         }
 
-        return $this->wait();
+//        $actions[] = new Action($this->rest(), $this);
+
+        return $actions;
     }
 
     public function brew(Order $order): string
