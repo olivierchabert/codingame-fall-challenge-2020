@@ -570,11 +570,11 @@ class Action
         return $next;
     }
 
-    public function process()
+    public function process(string $type, int $max)
     {
         $action = $this;
-        while ($action->step->iteration < 4 && !in_array($action->type, [self::TYPE_BREW, self::TYPE_WAIT])) {
-            $action = $action->step->bestAction();
+        while ($action->step->iteration <= $max && !in_array($action->type, [self::TYPE_BREW, self::TYPE_WAIT])) {
+            $action = $action->step->bestAction($type);
         }
 
         $this->iteration = $action->step->iteration;
@@ -643,12 +643,52 @@ class Step
         return (string)$action;
     }
 
-    public function bestAction(): Action
+    public function bestCast(): ?Action
+    {
+        $min = 5;
+        $max = 5;
+        $rupees = 0;
+        $action = null;
+
+        $castables = $this->players[0]->castables();
+        foreach ($castables as $spell) {
+            $repeat = 0;
+            $nbRepeat = 1;
+            $found = false;
+            $spell->nbRepeat = 1;
+            do {
+                $repeat++;
+                $action = new Action(Action::TYPE_CAST, $this, $spell);
+                $action->process(Action::TYPE_CAST, min($min, $max));
+                if ($action->iteration < $min && $action->rupees > $rupees) {
+                    $min = $action->iteration;
+                    $rupees = $action->rupees;
+                    $nbRepeat = $repeat;
+                    $found = true;
+                }
+            } while ($spell->repeatable && $spell->isCastable($repeat + 1));
+
+            if ($found) {
+                $spell->nbRepeat = $nbRepeat;
+            }
+        }
+
+        return $action;
+    }
+
+    public function bestAction($type = ''): Action
     {
         $order = $this->commerce->best($this->players[0]->inventory);
         if ($order !== null) {
             return new Action(Action::TYPE_BREW, $this, $order);
         }
+
+        $action = $this->bestCast();
+        $min = $action->iteration;
+
+
+
+
 
         $actions = $this->actions();
         if (empty($actions)) {
