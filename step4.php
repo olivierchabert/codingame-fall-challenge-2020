@@ -1,5 +1,7 @@
 <?php
 
+namespace Step3;
+
 class Recipe
 {
     /** @var int[] */
@@ -207,7 +209,13 @@ class Player
         );
     }
 
-    public function bestSpell(Inventory $inventory, Commerce $commerce, $onlyActive = true): ?Spell
+    /**
+     * @param Inventory $inventory
+     * @param Commerce $commerce
+     * @param bool $onlyActive
+     * @return Spell[]
+     */
+    public function bestSpell(Inventory $inventory, Commerce $commerce, $onlyActive = true): array
     {
         $castables = $this->castables($onlyActive);
         $castablesByCost = [];
@@ -240,14 +248,14 @@ class Player
             }
         }
 
+        $bests = [];
         if (!empty($castablesByCost)) {
             krsort($castablesByCost);
             $bests = reset($castablesByCost);
             krsort($bests);
-            return reset($bests);
         }
 
-        return null;
+        return $bests;
     }
 
     public function toRest()
@@ -292,16 +300,6 @@ class Commerce
             $this->orders,
             function (Order $a, Order $b) {
                 return $b->rupees <=> $a->rupees;
-            }
-        );
-    }
-
-    public function castables(Inventory $inventory): array
-    {
-        return array_filter(
-            $this->orders,
-            function (Order $order) use ($inventory) {
-                return $inventory->canProvide($order->recipe);
             }
         );
     }
@@ -377,7 +375,27 @@ class Tome
     /** @var TomeSpell[] */
     public $spells = [];
 
-    public function free(Player $player): ?TomeSpell
+    /**
+     * @param Inventory $inventory
+     * @return TomeSpell[]
+     */
+    public function learnables(Inventory $inventory): array
+    {
+        $learnables = [];
+        foreach ($this->spells as $tomeSpell) {
+            if ($inventory->canProvide(new Recipe(-$tomeSpell->index))) {
+                $learnables[] = $tomeSpell;
+            }
+        }
+
+        return $learnables;
+    }
+
+    /**
+     * @param Player $player
+     * @return TomeSpell[]
+     */
+    public function free(Player $player): array
     {
         $learnables = [];
         foreach ($this->spells as $tomeSpell) {
@@ -413,14 +431,16 @@ class Tome
                     return 0;
                 }
             );
-
-            return reset($learnables);
         }
 
-        return null;
+        return $learnables;
     }
 
-    public function best(Inventory $inventory): ?TomeSpell
+    /**
+     * @param Inventory $inventory
+     * @return TomeSpell[]
+     */
+    public function best(Inventory $inventory): array
     {
         $learnables = $this->learnables($inventory);
 
@@ -441,11 +461,9 @@ class Tome
                     return $cost;
                 }
             );
-
-            return reset($learnables);
         }
 
-        return null;
+        return $learnables;
     }
 
     public function get(int $id): ?TomeSpell
@@ -465,22 +483,6 @@ class Tome
         });
     }
 
-    /**
-     * @param Inventory $inventory
-     * @param int $limit
-     * @return TomeSpell[]
-     */
-    public function learnables(Inventory $inventory): array
-    {
-        $learnables = [];
-        foreach ($this->spells as $tomeSpell) {
-            if ($inventory->canProvide(new Recipe(-$tomeSpell->index))) {
-                $learnables[] = $tomeSpell;
-            }
-        }
-        return $learnables;
-    }
-
     public function __toString(): string
     {
         $msg = 'Tome:'."\n";
@@ -494,62 +496,89 @@ class Tome
 
 class Action
 {
+    const TYPE_BREW = 'BREW';
+    const TYPE_CAST = 'CAST';
+    const TYPE_LEARN = 'LEARN';
+    const TYPE_REST = 'REST';
+    const TYPE_WAIT = 'WAIT';
+
     /** @var string */
-    public $action;
+    public $type;
+    /** @var AbstractSpell */
+    public $spell;
+    /** @var int */
+    public $iteration = 0;
+    /** @var int */
+    public $rupees = 0;
     /** @var Step */
     public $step;
 
-    public function __construct(string $action, Step $step)
+    public function __construct(string $type, Step $step, ?AbstractSpell $spell = null)
     {
-        $this->action = $action;
+        $this->type = $type;
+        $this->spell = $spell;
         $this->step = $this->next($step);
+        $this->process();
+    }
+
+    public function __toString(): string
+    {
+        $action = $this->type;
+        switch ($this->type) {
+            case self::TYPE_BREW:
+            case self::TYPE_LEARN:
+                $action .= ' '.$this->spell->id;
+                break;
+            case self::TYPE_CAST:
+                $action .= ' '.$this->spell->id.' '.$this->spell->nbRepeat;
+                break;
+        }
+
+        return $action;
     }
 
     public function next(Step $current): Step
     {
         /** @var Step $next */
         $next = unserialize(serialize($current)); // make deep clone
+        $next->iteration++;
 
-        switch ($this->action) {
-            case 'REST':
-                $next->players[0]->rest();
-            case 'WAIT':
-                return $next;
-        }
-
-        [$action, $id] = explode(' ', $this->action);
-        switch ($action) {
-            case 'BREW':
-                $order = $next->commerce->get($id);
+        switch ($this->type) {
+            case self::TYPE_BREW:
+                $order = $next->commerce->get($this->spell->id);
                 $next->players[0]->rupees += $order->rupees;
-                $next->commerce->remove($id);
+                $next->commerce->remove($this->spell->id);
                 break;
-            case 'CAST':
-                $spell = $next->players[0]->get($id);
+            case self::TYPE_CAST:
+                $spell = $next->players[0]->get($this->spell->id);
                 for ($i = $spell->nbRepeat; $i > 0; $i--) {
                     $next->players[0]->inventory->add($spell->recipe);
                 }
                 $spell->active = false;
                 $spell->nbRepeat = 1;
                 break;
-            case 'LEARN':
-                $spell = $next->tome->get($id);
-                new Spell($id, $spell->recipe, $next->players[0], true, $spell->repeatable);
-                $next->tome->remove($id);
+            case self::TYPE_LEARN:
+                $spell = $next->tome->get($this->spell->id);
+                new Spell($this->spell->id, $spell->recipe, $next->players[0], true, $spell->repeatable);
+                $next->tome->remove($this->spell->id);
+                break;
+            case self::TYPE_REST:
+                $next->players[0]->rest();
                 break;
         }
 
         return $next;
     }
 
-    public function rupees(int $iteration): int
+    public function process()
     {
-        $rupees = $this->step->players[0]->rupees;
-        if ($iteration > 0) {
-            $iteration--;
-            $rupees += $this->step->bestAction($iteration)->rupees($iteration);
+        $action = $this;
+        while ($action->step->iteration < 4 && !in_array($action->type, [self::TYPE_BREW, self::TYPE_WAIT])) {
+            $action = $action->step->bestAction();
         }
-        return $rupees;
+
+        $this->iteration = $action->step->iteration;
+        $this->rupees = ($action->type === self::TYPE_BREW) ? $action->spell->rupees : 0;
     }
 }
 
@@ -561,6 +590,8 @@ class Step
     public $commerce;
     /** @var Tome */
     public $tome;
+    /** @var int */
+    public $iteration = 0;
 
     public function __construct()
     {
@@ -569,9 +600,11 @@ class Step
         $this->tome = new Tome();
 
         fscanf(STDIN, "%d", $argc);
+//        error_log($argc);
         for ($i = 0; $i < $argc; $i++) {
 
             $args = fscanf(STDIN, "%d %s %d %d %d %d %d %d %d %d %d");
+//            error_log(implode(' ', $args));
             switch ($args[1]) {
                 case 'BREW':
                     [$id, , $a, $b, $c, $d, $rupees, $bonus] = $args;
@@ -598,6 +631,7 @@ class Step
 
         for ($i = 0; $i < 2; $i++) {
             [$a, $b, $c, $d, $rupees] = fscanf(STDIN, "%d %d %d %d %d");
+//            error_log($a.' '.$b.' '.$c.' '.$d.' '.$rupees);
             $this->players[$i]->inventory = new Inventory($a, $b, $c, $d);
             $this->players[$i]->rupees = $rupees;
         }
@@ -605,24 +639,34 @@ class Step
 
     public function launch(): string
     {
-        return $this->bestAction(2)->action;
+        $action = $this->bestAction();
+        return (string)$action;
     }
 
-    public function bestAction(int $iteration): Action
+    public function bestAction(): Action
     {
-        $actions = $this->actions();
-        $best = new Action($this->rest(), $this);
-        $maxRupees = -1;
-
-        foreach ($actions as $action) {
-            $rupees = $action->rupees($iteration);
-            if ($maxRupees < $rupees) {
-                $best = $action;
-                $maxRupees = $rupees;
-            }
+        $order = $this->commerce->best($this->players[0]->inventory);
+        if ($order !== null) {
+            return new Action(Action::TYPE_BREW, $this, $order);
         }
 
-        return $best;
+        $actions = $this->actions();
+        if (empty($actions)) {
+            return new Action(Action::TYPE_WAIT, $this);
+        }
+
+        uasort(
+            $actions,
+            function (Action $a, Action $b) {
+                $sort = $b->iteration <=> $a->iteration;
+                if ($sort === 0) {
+                    $sort = $a->rupees <=> $b->rupees;
+                }
+
+                return $sort;
+            }
+        );
+        return $actions[0];
     }
 
     /**
@@ -632,97 +676,43 @@ class Step
     {
         $actions = [];
 
-        $order = $this->commerce->best($this->players[0]->inventory);
-        if ($order !== null) {
-            $actions[] = new Action($this->brew($order), $this);
-        } else {
-
-            $spells = array_slice($this->players[0]->castables(), 0, 3);
+        if ($this->iteration === 0) {
+            // learn new free spell
+            $spells = array_slice($this->tome->free($this->players[0]), 0, 1);
             foreach ($spells as $spell) {
-                $actions[] = new Action($this->cast($spell), $this);
+                $actions[] = new Action(Action::TYPE_LEARN, $this, $spell);
             }
-
-            if (count($this->players[0]->spells) < 10) {
-                $learnables = array_slice($this->tome->learnables($this->players[0]->inventory), 0, 2);
-                foreach ($learnables as $spell) {
-                    $actions[] = new Action($this->learn($spell), $this);
-                }
-            }
-
-            if (count($this->players[0]->toRest()) > 3) {
-                $actions[] = new Action($this->rest(), $this);
-            }
-        }
-
-        return $actions;
-
-
-
-        // learn new free spell
-        $spell = $this->tome->free($this->players[0]);
-        if ($spell !== null) {
-            $actions[] = new Action($this->learn($spell), $this);
-        }
-
-        // prepare order if is possible
-        $order = $this->commerce->best($this->players[0]->inventory);
-        if ($order !== null) {
-            $actions[] = new Action($this->brew($order), $this);
         }
 
         // execute spell
-        $spell = $this->players[0]->bestSpell($this->players[0]->inventory, $this->commerce);
-        if ($spell !== null) {
-            $actions[] = new Action($this->cast($spell), $this);
+        $spells = array_slice($this->players[0]->bestSpell($this->players[0]->inventory, $this->commerce), 0, 1);
+        foreach ($spells as $spell) {
+            $actions[] = new Action(Action::TYPE_CAST, $this, $spell);
         }
 
-        if (count($this->players[0]->toRest()) > 3) {
-            $actions[] = new Action($this->rest(), $this);
+        if (count($this->players[0]->toRest()) > 3 && $this->iteration < 2) {
+            $actions[] = new Action(Action::TYPE_REST, $this);
         }
 
         // learn new spell
-        $spell = $this->tome->best($this->players[0]->inventory);
-        if ($spell !== null) {
-            $actions[] = new Action($this->learn($spell), $this);
+        $spells = array_slice($this->tome->best($this->players[0]->inventory), 0, 1);
+        foreach ($spells as $spell) {
+            $actions[] = new Action(Action::TYPE_LEARN, $this, $spell);
         }
 
         if (empty($actions)) {
-            $actions[] = new Action($this->rest(), $this);
+            $actions[] = new Action(Action::TYPE_REST, $this);
         }
 
-//        $actions[] = new Action($this->rest(), $this);
-
         return $actions;
-    }
-
-    public function brew(Order $order): string
-    {
-        return 'BREW '.$order->id;
-    }
-
-    public function cast(Spell $spell): string
-    {
-        return 'CAST '.$spell->id.' '.$spell->nbRepeat;
-    }
-
-    public function learn(TomeSpell $spell): string
-    {
-        return 'LEARN '.$spell->id;
-    }
-
-    public function rest(): string
-    {
-        return 'REST';
-    }
-
-    public function wait(): string
-    {
-        return 'WAIT';
     }
 }
 
 // game loop
 while (true) {
+//    $time = microtime(true);
     $step = new Step();
     echo $step->launch()."\n";
+//    $time = microtime(true) - $time;
+//    error_log('TIME: '. $time . ' secondes');
 }
